@@ -1,0 +1,173 @@
+import java.util.*;
+import org.apache.spark.SparkConf;
+import org.apache.spark.api.java.JavaRDD;
+import org.apache.spark.api.java.JavaSparkContext;
+import org.apache.spark.api.java.JavaPairRDD;
+import org.apache.spark.api.java.*;
+import scala.Tuple2;
+
+public class Kmeans
+{
+
+	public static void main(String args[])
+  	{
+      // getting the input datapoint file from command line
+      String inputFile = args[0];
+      SparkConf conf = new SparkConf().setAppName("Kmeans Clustering");
+      JavaSparkContext jsc = new JavaSparkContext(conf);
+      // creating Java RDD from the input file
+      JavaRDD<String> lines = jsc.textFile(inputFile);
+      // start timer
+      long startTime = System.currentTimeMillis();
+      //creating  Java RDD of vector type and adding all the datapoints 
+      JavaRDD<Vector<Double>> dataPointVectors = lines.map(s -> 
+     {
+        // splitting input file contents using comma
+        String[] stringArray = s.split(",");
+			  Vector<Double> v = new Vector<Double>();  
+        // looping through each datapoint and adding it the vector datapointVectors
+        for (int i=0;i< stringArray.length; i++)
+			  {
+				  v.add(Double.parseDouble(stringArray[i]));	
+			  }	
+			  return v;
+		}); 
+    // getting the input centroid file from the command line
+    String clusterInputFile = args[1];
+    // creating a Java RDD pair from the input file
+    JavaRDD<String> clusterList = jsc.textFile(clusterInputFile);
+		// creating a Java RDD of vector type and adding all the centroids 
+		JavaRDD<Vector<Double>> clusterVectors = clusterList.map(s -> 
+    {
+     // splitting the input file contents using comma
+     String[] stringArray = s.split(",");
+		 Vector<Double> v = new Vector<Double>();
+     // looping through each centroid and adding it to the vector clusterVectors
+		 for (int i=0;i< stringArray.length; i++)
+			  {
+				  v.add(Double.parseDouble(stringArray[i]));	
+			  }	
+			  return v;
+		});    
+		List<Tuple2<Integer, Iterable<DataPoint>>> clusterAllDataPoints  = null;  
+		List<Tuple2<Integer, DataPoint>> newClusterVectors = new ArrayList<Tuple2<Integer, DataPoint>>();		
+		List<Vector<Double>> clusters = clusterVectors.collect();
+    // threshold to converge
+		double threshold = 0.0;
+    // maximum iterations possible
+		int maxIterations = 50;
+    // initialzing the iteratorCount
+		int iteratorCount = 0;
+    // maximum difference
+		double maxDistance = 0.2;
+   //Loop whether the  difference between the old and the new centroids is zero and no of iteartions is less than maximum iterations
+   while (maxDistance > threshold && iteratorCount < maxIterations)
+		{
+		   final List<Vector<Double>> finalClusters = clusters;
+		   JavaPairRDD<Integer, DataPoint> closestPointVectors = dataPointVectors.mapToPair(v -> 
+      {
+        int countOfIndices = v.size();
+			  double shortestDistance = 0;
+			  Integer shortestCluster = -1;
+			  int clusterSize = finalClusters.size();
+			  for (int i=0;i<clusterSize; i++)
+			  {
+			      Vector<Double> currentCluster = finalClusters.get(i);      
+			      double distance = 0;
+  			    // calculating the distance between each datapoint and current centroid
+			      for (int j=0;j<countOfIndices;j++)
+			      {
+			          distance = distance + Math.pow(v.get(j)-currentCluster.get(j),2);
+			      }
+            double dist_sqrt = Math.sqrt(distance);
+			     // assigning the shortest distance 
+			      if(shortestCluster == -1 || shortestDistance >  dist_sqrt)
+			      {
+				      shortestDistance = dist_sqrt;
+			        shortestCluster = i;
+			      }
+        }
+        DataPoint data = new DataPoint();
+			  data.v = v;
+			  data.count = 1;
+        return new Tuple2<Integer,DataPoint>(shortestCluster,data);
+     });  		   
+   		JavaPairRDD<Integer, DataPoint> shortestPoints = closestPointVectors.reduceByKey( (dataValue1, dataValue2) ->
+    {
+			int countOfIndices = dataValue1.v.size();
+			Vector<Double> newVector = new Vector<Double>();
+			// summing all the datapoints in a cluster
+			for (int i=0;i<countOfIndices;i++)
+			{
+			  newVector.add(dataValue1.v.get(i)+dataValue2.v.get(i));
+			}
+			// getting the totl count of datapoints
+			int newCount = dataValue1.count + dataValue2.count;
+			return new DataPoint(newVector, newCount);
+	  });
+    shortestPoints = shortestPoints.mapValues(data -> 
+    {
+			int countOfIndices = data.v.size();
+			// getting the new mean by dividing the sum of data points wit the total count
+			for (int i=0;i<countOfIndices;i++)
+			{
+			    data.v.set(i,data.v.get(i)/data.count);
+			}
+			return data;		
+		});
+    JavaPairRDD<Integer, Iterable<DataPoint>> clusterAllDataPointJavaPairs  = closestPointVectors.groupByKey();  
+		JavaRDD<Tuple2<Integer, Iterable<DataPoint>>> clusterAllDataPointJavaRDD = JavaRDD.fromRDD(clusterAllDataPointJavaPairs.rdd(), null);
+		clusterAllDataPoints = clusterAllDataPointJavaRDD.collect();
+		JavaRDD<Tuple2<Integer, DataPoint>> t = JavaRDD.fromRDD(shortestPoints.rdd(), null);
+		newClusterVectors = t.collect();   		
+		List<Vector<Double>> newClusters = new ArrayList(shortestPoints.mapValues(data-> data.v).collectAsMap().values());
+		int totalClusters = newClusterVectors.size();
+		//System.out.println(newClusterVectors.size());
+		double distanceNew  = 0;
+		//finding the distance between the old and new centroid
+    for (int i=0;i<totalClusters;i++)
+		{
+			Vector<Double> oldCluster = finalClusters.get(newClusterVectors.get(i)._1());
+			Vector<Double> currentCluster = newClusterVectors.get(i)._2().v;
+			int countOfIndices = currentCluster.size();
+			double distance = 0;
+			for (int j=0;j<countOfIndices;j++)
+			{
+			     distance = distance + Math.pow(oldCluster.get(j)-currentCluster.get(j),2);
+			}
+				
+			distanceNew  = distanceNew + Math.sqrt(distance);
+	 }
+   maxDistance = distanceNew;
+	 clusters = newClusters;
+	 iteratorCount++;	
+	}
+  int iteratorCountFinal = iteratorCount;
+  // printing the final cluster and the total execution time 
+	System.err.println("Done: IterationCount :: " + iteratorCountFinal + " Distance :: " + maxDistance);
+  System.err.println("Printing Final Clusters--------------------------------------");
+   for (Tuple2<Integer,DataPoint> t : newClusterVectors)
+	{
+	    System.err.println("Cluster " + t._1() + ": " + t._2().v);
+	}
+  long endTime = System.currentTimeMillis();
+  System.err.println("Done : Time taken:" + (Long.toString((endTime - startTime))));
+ }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
